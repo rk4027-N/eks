@@ -1,50 +1,63 @@
-# Production-Grade EKS Monitoring Stack
+# Production-Grade EKS Monitoring Stack  
+## Prometheus + Grafana + Alertmanager + CloudWatch + Slack
 
-This repository documents a production-style monitoring and observability setup for an Amazon EKS cluster using Prometheus, Grafana, Alertmanager, Slack, CloudWatch Container Insights, Fluent Bit, AWS Load Balancer Controller, ACM, Route 53, EBS CSI Driver, and gp3 persistent storage.
+This README explains the complete monitoring setup we built on Amazon EKS.
 
-> Current scope: **cluster/platform monitoring**.  
-> Application-specific monitoring will be added after application deployment.
+It is written for a beginner who does not just want commands, but also wants to understand:
+
+- What each component does
+- Why we installed it
+- What problem it solves
+- What errors happened
+- How we diagnosed each error
+- How we fixed each issue
+- How to validate the setup
+- What is still pending after application deployment
+
+> **Current scope:** This setup covers cluster/platform monitoring. Application-specific monitoring will be added after an application is deployed.
 
 ---
 
 ## Table of Contents
 
-1. [Architecture](#architecture)
-2. [What Was Implemented](#what-was-implemented)
-3. [Prerequisites](#prerequisites)
-4. [Namespaces](#namespaces)
-5. [Helm Installation](#helm-installation)
-6. [ACM Wildcard Certificate](#acm-wildcard-certificate)
-7. [EKS Cluster Variables](#eks-cluster-variables)
-8. [IAM OIDC Provider](#iam-oidc-provider)
-9. [AWS Load Balancer Controller](#aws-load-balancer-controller)
-10. [AWS Load Balancer Controller Troubleshooting](#aws-load-balancer-controller-troubleshooting)
-11. [EBS CSI Driver](#ebs-csi-driver)
-12. [gp3 StorageClass](#gp3-storageclass)
-13. [Grafana Admin Secret](#grafana-admin-secret)
-14. [kube-prometheus-stack Values](#kube-prometheus-stack-values)
-15. [Install kube-prometheus-stack](#install-kube-prometheus-stack)
-16. [Grafana Ingress and ALB](#grafana-ingress-and-alb)
-17. [Route 53 DNS Record](#route-53-dns-record)
-18. [Prometheus Validation in Grafana](#prometheus-validation-in-grafana)
-19. [Production Prometheus Alert Rules](#production-prometheus-alert-rules)
-20. [CloudWatch Observability Add-on](#cloudwatch-observability-add-on)
-21. [CloudWatch IAM Fix](#cloudwatch-iam-fix)
-22. [CloudWatch Log Group Validation](#cloudwatch-log-group-validation)
-23. [CloudWatch Metrics Validation](#cloudwatch-metrics-validation)
-24. [Grafana CloudWatch Datasource](#grafana-cloudwatch-datasource)
-25. [Grafana CloudWatch IRSA Role](#grafana-cloudwatch-irsa-role)
-26. [Alertmanager Slack Integration](#alertmanager-slack-integration)
-27. [Test Slack Alert](#test-slack-alert)
-28. [Slack Troubleshooting](#slack-troubleshooting)
-29. [Cleanup Test Alert](#cleanup-test-alert)
-30. [Final Completed Status](#final-completed-status)
-31. [Pending Application Monitoring](#pending-application-monitoring)
-32. [Production Hardening Recommendations](#production-hardening-recommendations)
+1. [Final Architecture](#1-final-architecture)
+2. [What We Built](#2-what-we-built)
+3. [Important Concepts Before Starting](#3-important-concepts-before-starting)
+4. [Namespaces](#4-namespaces)
+5. [Helm Installation](#5-helm-installation)
+6. [ACM Wildcard Certificate](#6-acm-wildcard-certificate)
+7. [EKS Cluster Variables](#7-eks-cluster-variables)
+8. [IAM OIDC Provider and IRSA](#8-iam-oidc-provider-and-irsa)
+9. [AWS Load Balancer Controller](#9-aws-load-balancer-controller)
+10. [Troubleshooting AWS Load Balancer Controller](#10-troubleshooting-aws-load-balancer-controller)
+11. [EBS CSI Driver](#11-ebs-csi-driver)
+12. [gp3 StorageClass](#12-gp3-storageclass)
+13. [Grafana Admin Secret](#13-grafana-admin-secret)
+14. [kube-prometheus-stack Values File](#14-kube-prometheus-stack-values-file)
+15. [Install Prometheus, Grafana, and Alertmanager](#15-install-prometheus-grafana-and-alertmanager)
+16. [Grafana Ingress and ALB](#16-grafana-ingress-and-alb)
+17. [Route 53 DNS Record](#17-route-53-dns-record)
+18. [Grafana and Prometheus Validation](#18-grafana-and-prometheus-validation)
+19. [Prometheus Metrics Explained](#19-prometheus-metrics-explained)
+20. [Production Prometheus Alert Rules](#20-production-prometheus-alert-rules)
+21. [CloudWatch Observability Add-on](#21-cloudwatch-observability-add-on)
+22. [Troubleshooting CloudWatch IAM Permissions](#22-troubleshooting-cloudwatch-iam-permissions)
+23. [CloudWatch Logs and Metrics Validation](#23-cloudwatch-logs-and-metrics-validation)
+24. [Grafana CloudWatch Datasource](#24-grafana-cloudwatch-datasource)
+25. [Troubleshooting Grafana CloudWatch Datasource](#25-troubleshooting-grafana-cloudwatch-datasource)
+26. [Alertmanager Slack Integration](#26-alertmanager-slack-integration)
+27. [Slack Alert Test](#27-slack-alert-test)
+28. [Troubleshooting Slack Alerts](#28-troubleshooting-slack-alerts)
+29. [Cleanup Test Alert](#29-cleanup-test-alert)
+30. [Final Status](#30-final-status)
+31. [Pending After Application Deployment](#31-pending-after-application-deployment)
+32. [Production Hardening](#32-production-hardening)
+33. [How to Think Like a Troubleshooter](#33-how-to-think-like-a-troubleshooter)
+34. [Interview Explanation](#34-interview-explanation)
 
 ---
 
-## Architecture
+# 1. Final Architecture
 
 ```text
 EKS Cluster
@@ -57,27 +70,21 @@ EKS Cluster
   |     |-- node-exporter
   |
   |-- AWS Load Balancer Controller
-  |     |-- Creates ALB for Grafana
+  |     |-- Creates AWS ALB for Grafana Ingress
   |
   |-- EBS CSI Driver
-  |     |-- Creates gp3 volumes for Prometheus/Grafana/Alertmanager PVCs
+  |     |-- Creates gp3 EBS volumes for persistent monitoring data
   |
   |-- CloudWatch Observability Add-on
   |     |-- CloudWatch Agent
   |     |-- Fluent Bit
-  |     |-- Container Insights metrics/logs
+  |     |-- Container Insights metrics and logs
   |
   |-- Alertmanager
         |-- Sends alerts to Slack
 ```
 
-Final Grafana access pattern:
-
-```text
-https://grafana.<your-domain>
-```
-
-Example:
+Final Grafana URL:
 
 ```text
 https://grafana.learnwithmedevops.online
@@ -85,66 +92,196 @@ https://grafana.learnwithmedevops.online
 
 ---
 
-## What Was Implemented
+# 2. What We Built
+
+We built a production-style monitoring stack for an EKS cluster.
+
+## Main Components
+
+| Component | Purpose |
+|---|---|
+| Prometheus | Collects and stores metrics |
+| Grafana | Visualizes metrics and logs using dashboards |
+| Alertmanager | Sends alerts to Slack |
+| kube-state-metrics | Exposes Kubernetes object status metrics |
+| node-exporter | Exposes node CPU, memory, disk, network metrics |
+| CloudWatch Agent | Sends EKS/container metrics to CloudWatch |
+| Fluent Bit | Sends container logs to CloudWatch Logs |
+| AWS Load Balancer Controller | Creates ALB from Kubernetes Ingress |
+| EBS CSI Driver | Creates EBS volumes for Kubernetes PVCs |
+| ACM | Provides HTTPS certificate |
+| Route 53 | Provides DNS name for Grafana |
+| Slack Webhook | Receives alert notifications |
+
+---
+
+# 3. Important Concepts Before Starting
+
+## What is monitoring?
+
+Monitoring means continuously collecting system health data such as:
+
+```text
+CPU
+Memory
+Disk
+Network
+Pod health
+Node health
+Container restarts
+Application errors
+Latency
+HTTP 5xx errors
+```
+
+## What is observability?
+
+Observability is broader than monitoring. It helps answer:
+
+```text
+What is broken?
+Where is it broken?
+Why is it broken?
+When did it start?
+What changed?
+```
+
+Observability usually has three pillars:
+
+```text
+Metrics
+Logs
+Traces
+```
+
+In this setup:
+
+```text
+Metrics = Prometheus + CloudWatch Container Insights
+Logs    = CloudWatch Logs using Fluent Bit
+Alerts  = Alertmanager + Slack
+Dashboards = Grafana
+```
+
+## What is Prometheus?
+
+Prometheus is a metrics database. It periodically scrapes HTTP endpoints that expose metrics.
+
+Example:
+
+```text
+node-exporter exposes node metrics
+kube-state-metrics exposes Kubernetes metrics
+Prometheus scrapes those metrics
+Grafana queries Prometheus
+```
+
+## What is Grafana?
+
+Grafana is a dashboard and visualization tool. It does not usually collect metrics by itself. It connects to data sources like:
 
 ```text
 Prometheus
-Grafana
+CloudWatch
+Loki
+Elasticsearch
+```
+
+In this setup:
+
+```text
+Grafana reads Kubernetes metrics from Prometheus
+Grafana reads AWS metrics/logs from CloudWatch
+```
+
+## What is Alertmanager?
+
+Alertmanager receives alerts from Prometheus and sends notifications to channels like:
+
+```text
+Slack
+Email
+PagerDuty
+Microsoft Teams
+Opsgenie
+```
+
+## What is CloudWatch Observability Add-on?
+
+It is an AWS managed add-on for EKS that installs:
+
+```text
+CloudWatch Agent
+Fluent Bit
+```
+
+It collects:
+
+```text
+EKS node metrics
+Pod metrics
+Container metrics
+Container logs
+Performance logs
+```
+
+## What is IRSA?
+
+IRSA means **IAM Roles for Service Accounts**.
+
+In Kubernetes, pods run using ServiceAccounts. In AWS, permissions are given using IAM roles.
+
+IRSA connects them:
+
+```text
+Kubernetes ServiceAccount
+        ↓
+IAM Role
+        ↓
+AWS permissions
+```
+
+We used IRSA for:
+
+```text
 AWS Load Balancer Controller
-ACM certificate
-Route 53
-EBS CSI Driver
-gp3 StorageClass
-CloudWatch Observability add-on
-CloudWatch logs/metrics
 Grafana CloudWatch datasource
-Alertmanager
-Slack alerts
-Troubleshooting fixes
+```
+
+## What is ALB Ingress?
+
+In Kubernetes, an Ingress exposes applications externally.
+
+In AWS EKS, the AWS Load Balancer Controller watches Ingress resources and creates an AWS Application Load Balancer.
+
+Flow:
+
+```text
+Grafana Ingress
+      ↓
+AWS Load Balancer Controller
+      ↓
+AWS ALB
+      ↓
+Route 53 DNS
+      ↓
+https://grafana.learnwithmedevops.online
 ```
 
 ---
 
-## Prerequisites
+# 4. Namespaces
 
-Required tools:
-
-```text
-awscli
-kubectl
-eksctl
-helm
-```
-
-Required AWS resources:
-
-```text
-EKS cluster
-Route 53 hosted zone
-ACM certificate
-Worker node IAM role
-OIDC provider associated with EKS
-```
-
-Example cluster:
-
-```text
-Cluster name: day20-eks
-Region: us-east-1
-```
-
----
-
-## Namespaces
-
-Create namespaces:
+## Command
 
 ```bash
 kubectl create namespace monitoring
 kubectl create namespace logging
 ```
 
-Explanation:
+## Why we did this
+
+Namespaces separate workloads logically.
 
 ```text
 monitoring namespace:
@@ -155,14 +292,41 @@ monitoring namespace:
   node-exporter
 
 logging namespace:
-  reserved for ELK/logging later
+  reserved for future ELK/logging stack
+```
+
+## How to validate
+
+```bash
+kubectl get ns
+```
+
+Expected:
+
+```text
+monitoring
+logging
 ```
 
 ---
 
-## Helm Installation
+# 5. Helm Installation
 
-If Helm is missing:
+## Problem
+
+When we tried to use Helm:
+
+```text
+helm: command not found
+```
+
+## What this means
+
+Helm was not installed on the Ubuntu machine.
+
+Helm is required because we installed Prometheus/Grafana and AWS Load Balancer Controller using Helm charts.
+
+## Fix
 
 ```bash
 curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
@@ -170,25 +334,46 @@ chmod 700 get_helm.sh
 ./get_helm.sh
 ```
 
-Add Prometheus community Helm repo:
+## Add Prometheus Helm repo
 
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
 ```
 
-Add AWS EKS Helm repo:
+## Add AWS EKS Helm repo
 
 ```bash
 helm repo add eks https://aws.github.io/eks-charts
 helm repo update
 ```
 
+## Why we added these repos
+
+```text
+prometheus-community repo:
+  contains kube-prometheus-stack chart
+
+eks repo:
+  contains aws-load-balancer-controller chart
+```
+
 ---
 
-## ACM Wildcard Certificate
+# 6. ACM Wildcard Certificate
 
-Create one wildcard certificate for all first-level subdomains:
+## Goal
+
+Use one certificate for multiple subdomains:
+
+```text
+grafana.learnwithmedevops.online
+kibana.learnwithmedevops.online
+argocd.learnwithmedevops.online
+jenkins.learnwithmedevops.online
+```
+
+## Command
 
 ```bash
 aws acm request-certificate \
@@ -198,41 +383,78 @@ aws acm request-certificate \
   --region us-east-1
 ```
 
-Example certificate ARN:
+## Why wildcard certificate?
+
+A wildcard certificate like:
 
 ```text
-arn:aws:acm:us-east-1:<ACCOUNT_ID>:certificate/<CERTIFICATE_ID>
+*.learnwithmedevops.online
 ```
 
-Get DNS validation record:
+can secure:
+
+```text
+grafana.learnwithmedevops.online
+kibana.learnwithmedevops.online
+argocd.learnwithmedevops.online
+jenkins.learnwithmedevops.online
+```
+
+It does not cover deeper levels like:
+
+```text
+api.dev.learnwithmedevops.online
+```
+
+For that, you need:
+
+```text
+*.dev.learnwithmedevops.online
+```
+
+## Certificate ARN
+
+```text
+arn:aws:acm:us-east-1:590999018668:certificate/3d3f6e84-fa39-44e0-bf21-c65b70874867
+```
+
+## Get DNS validation record
 
 ```bash
 aws acm describe-certificate \
-  --certificate-arn arn:aws:acm:us-east-1:<ACCOUNT_ID>:certificate/<CERTIFICATE_ID> \
+  --certificate-arn arn:aws:acm:us-east-1:590999018668:certificate/3d3f6e84-fa39-44e0-bf21-c65b70874867 \
   --region us-east-1 \
   --query "Certificate.DomainValidationOptions[*].ResourceRecord"
 ```
 
-Example DNS validation CNAME:
+Validation record:
 
 ```text
 Name:
-_<TOKEN>.learnwithmedevops.online.
+_d34bac15f0db3f123a32c0608c22c134.learnwithmedevops.online.
 
 Type:
 CNAME
 
 Value:
-_<TOKEN>.acm-validations.aws.
+_208d2ba95cf076f8bc334cdd2ae8f6e9.jkddzztszm.acm-validations.aws.
 ```
 
-Create this CNAME record in Route 53.
+## What we did in Route 53
 
-Check certificate status:
+Created CNAME record:
+
+```text
+_d34bac15f0db3f123a32c0608c22c134.learnwithmedevops.online
+→
+_208d2ba95cf076f8bc334cdd2ae8f6e9.jkddzztszm.acm-validations.aws.
+```
+
+## Validate certificate
 
 ```bash
 aws acm describe-certificate \
-  --certificate-arn arn:aws:acm:us-east-1:<ACCOUNT_ID>:certificate/<CERTIFICATE_ID> \
+  --certificate-arn arn:aws:acm:us-east-1:590999018668:certificate/3d3f6e84-fa39-44e0-bf21-c65b70874867 \
   --region us-east-1 \
   --query "Certificate.Status" \
   --output text
@@ -244,35 +466,45 @@ Expected:
 ISSUED
 ```
 
-This wildcard certificate can be used for:
+## Why certificate must be issued before ALB HTTPS works
+
+The ALB HTTPS listener needs a valid ACM certificate. If the certificate is still:
 
 ```text
-grafana.learnwithmedevops.online
-kibana.learnwithmedevops.online
-argocd.learnwithmedevops.online
-jenkins.learnwithmedevops.online
-app.learnwithmedevops.online
+PENDING_VALIDATION
 ```
+
+then ALB cannot correctly serve HTTPS.
 
 ---
 
-## EKS Cluster Variables
+# 7. EKS Cluster Variables
 
-Set variables:
+## Commands
 
 ```bash
 export CLUSTER_NAME=day20-eks
 export REGION=us-east-1
-export ACCOUNT_ID=<ACCOUNT_ID>
+export ACCOUNT_ID=590999018668
 ```
 
-Verify nodes:
+## Why we used variables
+
+Instead of typing the same values repeatedly, we exported variables.
+
+Example:
+
+```bash
+aws eks describe-cluster --name $CLUSTER_NAME --region $REGION
+```
+
+## Validate nodes
 
 ```bash
 kubectl get nodes
 ```
 
-Example nodes:
+Observed nodes:
 
 ```text
 ip-10-0-1-163.ec2.internal
@@ -280,11 +512,15 @@ ip-10-0-2-58.ec2.internal
 ip-10-0-3-249.ec2.internal
 ```
 
+## What this means
+
+Your Kubernetes cluster had 3 worker nodes ready to run pods.
+
 ---
 
-## IAM OIDC Provider
+# 8. IAM OIDC Provider and IRSA
 
-Associate IAM OIDC provider:
+## Command
 
 ```bash
 eksctl utils associate-iam-oidc-provider \
@@ -293,34 +529,72 @@ eksctl utils associate-iam-oidc-provider \
   --approve
 ```
 
-Expected if already present:
+Output:
 
 ```text
-IAM Open ID Connect provider is already associated with cluster
+IAM Open ID Connect provider is already associated with cluster "day20-eks" in "us-east-1"
 ```
 
-Why this is required:
+## What this means
+
+OIDC was already enabled for this EKS cluster.
+
+## Why OIDC matters
+
+Without OIDC, pods cannot assume IAM roles through IRSA.
+
+IRSA flow:
 
 ```text
-OIDC is required for IRSA.
-IRSA allows Kubernetes ServiceAccounts to assume IAM roles.
-Used for:
-  AWS Load Balancer Controller
-  Grafana CloudWatch datasource
+Pod
+  ↓
+Kubernetes ServiceAccount
+  ↓
+IAM OIDC Provider
+  ↓
+IAM Role
+  ↓
+AWS permissions
 ```
+
+If OIDC or trust policy is wrong, you will see errors like:
+
+```text
+AccessDenied: sts:AssumeRoleWithWebIdentity
+```
+
+We saw this later for AWS Load Balancer Controller.
 
 ---
 
-## AWS Load Balancer Controller
+# 9. AWS Load Balancer Controller
 
-### Download IAM policy
+## Why we need it
+
+Grafana Ingress uses:
+
+```yaml
+ingressClassName: alb
+```
+
+That means Kubernetes expects AWS Load Balancer Controller to create an AWS ALB.
+
+Without this controller:
+
+```text
+Ingress exists
+but ALB is not created
+ADDRESS remains empty
+```
+
+## Download IAM policy
 
 ```bash
 curl -o iam_policy.json \
   https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json
 ```
 
-### Create IAM policy
+## Create IAM policy
 
 ```bash
 aws iam create-policy \
@@ -331,10 +605,10 @@ aws iam create-policy \
 Policy ARN:
 
 ```text
-arn:aws:iam::<ACCOUNT_ID>:policy/AWSLoadBalancerControllerIAMPolicy
+arn:aws:iam::590999018668:policy/AWSLoadBalancerControllerIAMPolicy
 ```
 
-### Try creating IAM ServiceAccount
+## Try creating IAM service account
 
 ```bash
 eksctl create iamserviceaccount \
@@ -347,11 +621,13 @@ eksctl create iamserviceaccount \
   --approve
 ```
 
-If it skips because of an existing or missing service account issue, use the troubleshooting section below.
+## Issue
 
-### Install controller
+`eksctl` skipped the service account because it thought it already existed.
 
-Get VPC ID:
+This caused problems later.
+
+## Get VPC ID
 
 ```bash
 export VPC_ID=$(aws eks describe-cluster \
@@ -363,7 +639,13 @@ export VPC_ID=$(aws eks describe-cluster \
 echo $VPC_ID
 ```
 
-Install controller:
+VPC:
+
+```text
+vpc-0d785093f6a1c1286
+```
+
+## Install controller
 
 ```bash
 helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
@@ -375,7 +657,7 @@ helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-contro
   --set vpcId=$VPC_ID
 ```
 
-Verify:
+## Validate
 
 ```bash
 kubectl get deployment -n kube-system aws-load-balancer-controller
@@ -385,53 +667,95 @@ kubectl get ingressclass
 Expected:
 
 ```text
-aws-load-balancer-controller   2/2
+aws-load-balancer-controller 2/2 Running
 alb
 ```
 
 ---
 
-## AWS Load Balancer Controller Troubleshooting
+# 10. Troubleshooting AWS Load Balancer Controller
 
-### Issue 1: Controller stuck at 0/2
+## Problem 1: Deployment was 0/2
 
-Check ReplicaSet:
+Output:
+
+```text
+aws-load-balancer-controller 0/2
+```
+
+## Check pods
+
+```bash
+kubectl get pods -n kube-system | grep aws-load-balancer
+```
+
+No pods were shown.
+
+## Check ReplicaSet
 
 ```bash
 kubectl get rs -n kube-system | grep aws-load-balancer
 kubectl describe rs -n kube-system <replicaset-name>
 ```
 
-Example error:
+## Error found
 
 ```text
+Error creating pods:
 serviceaccount "aws-load-balancer-controller" not found
 ```
 
-Fix:
+## Meaning
+
+Deployment was trying to create pods using this ServiceAccount:
+
+```text
+kube-system/aws-load-balancer-controller
+```
+
+But the ServiceAccount did not exist.
+
+## Fix
 
 ```bash
 kubectl create serviceaccount aws-load-balancer-controller -n kube-system
 ```
 
-Annotate ServiceAccount:
+Annotate it with IAM role:
 
 ```bash
 kubectl annotate serviceaccount aws-load-balancer-controller \
   -n kube-system \
-  eks.amazonaws.com/role-arn=arn:aws:iam::<ACCOUNT_ID>:role/AmazonEKSLoadBalancerControllerRole \
+  eks.amazonaws.com/role-arn=arn:aws:iam::590999018668:role/AmazonEKSLoadBalancerControllerRole \
   --overwrite
 ```
 
-### Issue 2: IAM role does not exist
+---
+
+## Problem 2: IAM role did not exist
+
+Command failed:
+
+```bash
+aws iam update-assume-role-policy \
+  --role-name AmazonEKSLoadBalancerControllerRole \
+  --policy-document file://alb-controller-trust-policy.json
+```
 
 Error:
 
 ```text
-NoSuchEntity: The role with name AmazonEKSLoadBalancerControllerRole cannot be found
+NoSuchEntity:
+The role with name AmazonEKSLoadBalancerControllerRole cannot be found.
 ```
 
-Generate OIDC variables:
+## Meaning
+
+The ServiceAccount was pointing to an IAM role that was not created.
+
+So pods could not assume the role.
+
+## Create trust policy
 
 ```bash
 export OIDC_ID=$(aws eks describe-cluster \
@@ -441,11 +765,7 @@ export OIDC_ID=$(aws eks describe-cluster \
   --output text | cut -d '/' -f 5)
 
 export OIDC_PROVIDER="oidc.eks.${REGION}.amazonaws.com/id/${OIDC_ID}"
-```
 
-Create trust policy:
-
-```bash
 cat > alb-controller-trust-policy.json << EOF
 {
   "Version": "2012-10-17",
@@ -468,7 +788,7 @@ cat > alb-controller-trust-policy.json << EOF
 EOF
 ```
 
-Create IAM role:
+## Create role
 
 ```bash
 aws iam create-role \
@@ -476,32 +796,58 @@ aws iam create-role \
   --assume-role-policy-document file://alb-controller-trust-policy.json
 ```
 
-Attach policy:
+## Attach policy
 
 ```bash
 aws iam attach-role-policy \
   --role-name AmazonEKSLoadBalancerControllerRole \
-  --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/AWSLoadBalancerControllerIAMPolicy
+  --policy-arn arn:aws:iam::590999018668:policy/AWSLoadBalancerControllerIAMPolicy
 ```
 
-Restart controller:
+## Restart controller
 
 ```bash
 kubectl rollout restart deployment aws-load-balancer-controller -n kube-system
 kubectl rollout status deployment aws-load-balancer-controller -n kube-system
 ```
 
-Expected:
+Final result:
 
 ```text
 aws-load-balancer-controller 2/2 Running
 ```
 
+## Troubleshooting lesson
+
+When an EKS pod needs AWS permission, check:
+
+```text
+1. Does the Kubernetes ServiceAccount exist?
+2. Does the ServiceAccount have eks.amazonaws.com/role-arn annotation?
+3. Does the IAM role exist?
+4. Does the IAM role trust policy allow this ServiceAccount?
+5. Does the IAM role have required permissions?
+```
+
 ---
 
-## EBS CSI Driver
+# 11. EBS CSI Driver
 
-Create IAM role for EBS CSI:
+## Why we need it
+
+Prometheus, Grafana, and Alertmanager need persistent storage.
+
+Without persistent storage:
+
+```text
+Grafana dashboards/config can be lost
+Prometheus metrics can be lost
+Alertmanager state can be lost
+```
+
+In EKS, Kubernetes needs EBS CSI Driver to dynamically create EBS volumes.
+
+## Create IAM role for EBS CSI
 
 ```bash
 eksctl create iamserviceaccount \
@@ -515,7 +861,7 @@ eksctl create iamserviceaccount \
   --approve
 ```
 
-Get role ARN:
+## Get role ARN
 
 ```bash
 export EBS_CSI_ROLE_ARN=$(aws iam get-role \
@@ -526,7 +872,7 @@ export EBS_CSI_ROLE_ARN=$(aws iam get-role \
 echo $EBS_CSI_ROLE_ARN
 ```
 
-Create EKS add-on:
+## Install add-on
 
 ```bash
 aws eks create-addon \
@@ -536,7 +882,7 @@ aws eks create-addon \
   --service-account-role-arn $EBS_CSI_ROLE_ARN
 ```
 
-Verify:
+## Validate
 
 ```bash
 kubectl get pods -n kube-system | grep ebs-csi
@@ -545,15 +891,19 @@ kubectl get pods -n kube-system | grep ebs-csi
 Expected:
 
 ```text
-ebs-csi-controller running
-ebs-csi-node running on all nodes
+ebs-csi-controller Running
+ebs-csi-node Running
 ```
 
 ---
 
-## gp3 StorageClass
+# 12. gp3 StorageClass
 
-Create gp3 StorageClass:
+## Why gp3?
+
+`gp3` is the newer general-purpose EBS volume type. It is commonly used in production because it provides good performance and cost efficiency.
+
+## Create StorageClass
 
 ```bash
 cat > gp3-storageclass.yaml << 'EOF'
@@ -572,7 +922,7 @@ EOF
 kubectl apply -f gp3-storageclass.yaml
 ```
 
-Verify:
+## Validate
 
 ```bash
 kubectl get storageclass
@@ -581,50 +931,54 @@ kubectl get storageclass
 Expected:
 
 ```text
-gp2
-gp3
+gp3 ebs.csi.aws.com
 ```
 
-Explanation:
+## What `WaitForFirstConsumer` means
 
-```text
-Prometheus, Grafana, and Alertmanager need persistent storage.
-gp3 volumes are provisioned through the EBS CSI Driver.
-```
+The EBS volume is created only when a pod needs it.
+
+This helps Kubernetes choose the correct Availability Zone.
 
 ---
 
-## Grafana Admin Secret
+# 13. Grafana Admin Secret
 
-Create Grafana admin secret:
+## Why we used a Secret
+
+We did not want to hardcode the Grafana password directly into Helm values.
+
+## Command
 
 ```bash
 kubectl create secret generic grafana-admin-secret \
   -n monitoring \
   --from-literal=admin-user=admin \
-  --from-literal=admin-password='CHANGE_ME_STRONG_PASSWORD'
+  --from-literal=admin-password='Grafana@12345'
 ```
 
-Explanation:
+## Production note
+
+For real production:
 
 ```text
-Do not hardcode Grafana passwords directly in Helm values.
-Use Kubernetes Secret or External Secrets.
+Use stronger password
+Store secret in External Secrets / AWS Secrets Manager
+Do not commit passwords to Git
 ```
 
 ---
 
-## kube-prometheus-stack Values
+# 14. kube-prometheus-stack Values File
 
-Create `kube-prometheus-values.yaml`:
+This file controls the monitoring stack installation.
 
-```yaml
+Create:
+
+```bash
+cat > kube-prometheus-values.yaml << 'EOF'
 grafana:
   enabled: true
-
-  serviceAccount:
-    annotations:
-      eks.amazonaws.com/role-arn: arn:aws:iam::<ACCOUNT_ID>:role/GrafanaCloudWatchDatasourceRole
 
   admin:
     existingSecret: grafana-admin-secret
@@ -650,7 +1004,7 @@ grafana:
       alb.ingress.kubernetes.io/scheme: internet-facing
       alb.ingress.kubernetes.io/target-type: ip
       alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:<ACCOUNT_ID>:certificate/<CERTIFICATE_ID>
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:590999018668:certificate/3d3f6e84-fa39-44e0-bf21-c65b70874867
       alb.ingress.kubernetes.io/ssl-redirect: "443"
 
 prometheus:
@@ -703,13 +1057,102 @@ prometheus-node-exporter:
   enabled: true
   tolerations:
     - operator: Exists
+EOF
 ```
+
+## Explanation of important fields
+
+### Grafana
+
+```yaml
+grafana:
+  enabled: true
+```
+
+Installs Grafana.
+
+### Grafana persistence
+
+```yaml
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClassName: gp3
+```
+
+Keeps Grafana data on EBS volume.
+
+### Grafana service
+
+```yaml
+service:
+  type: ClusterIP
+```
+
+Grafana is not exposed directly by LoadBalancer service. It is exposed through Ingress and ALB.
+
+### Grafana ingress
+
+```yaml
+ingressClassName: alb
+```
+
+Tells Kubernetes to use AWS Load Balancer Controller.
+
+### ALB group
+
+```yaml
+alb.ingress.kubernetes.io/group.name: platform-tools
+```
+
+This allows multiple ingresses to share the same ALB later.
+
+### HTTPS certificate
+
+```yaml
+alb.ingress.kubernetes.io/certificate-arn: <ACM ARN>
+```
+
+Attaches ACM certificate to ALB HTTPS listener.
+
+### Prometheus replicas
+
+```yaml
+replicas: 2
+```
+
+Runs two Prometheus pods for better availability.
+
+### Prometheus retention
+
+```yaml
+retention: 15d
+retentionSize: 40GB
+```
+
+Keeps metrics for 15 days or until storage limit.
+
+### Prometheus storage
+
+```yaml
+storage: 50Gi
+```
+
+Each Prometheus replica gets persistent EBS storage.
+
+### Alertmanager replicas
+
+```yaml
+replicas: 2
+```
+
+Runs two Alertmanager pods for high availability.
 
 ---
 
-## Install kube-prometheus-stack
+# 15. Install Prometheus, Grafana, and Alertmanager
 
-Install monitoring stack:
+## Command
 
 ```bash
 helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
@@ -717,7 +1160,7 @@ helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
   -f kube-prometheus-values.yaml
 ```
 
-Verify pods:
+## Validate pods
 
 ```bash
 kubectl get pods -n monitoring
@@ -726,23 +1169,23 @@ kubectl get pods -n monitoring
 Expected:
 
 ```text
-alertmanager-monitoring-kube-prometheus-alertmanager-0
-alertmanager-monitoring-kube-prometheus-alertmanager-1
 monitoring-grafana
-monitoring-kube-prometheus-operator
-monitoring-kube-state-metrics
-monitoring-prometheus-node-exporter
 prometheus-monitoring-kube-prometheus-prometheus-0
 prometheus-monitoring-kube-prometheus-prometheus-1
+alertmanager-monitoring-kube-prometheus-alertmanager-0
+alertmanager-monitoring-kube-prometheus-alertmanager-1
+monitoring-kube-state-metrics
+monitoring-prometheus-node-exporter
+monitoring-kube-prometheus-operator
 ```
 
-Verify services:
+## Validate services
 
 ```bash
 kubectl get svc -n monitoring
 ```
 
-Verify PVCs:
+## Validate PVCs
 
 ```bash
 kubectl get pvc -n monitoring
@@ -752,13 +1195,15 @@ Expected:
 
 ```text
 monitoring-grafana Bound 10Gi gp3
+Prometheus PVCs Bound
+Alertmanager PVCs Bound
 ```
 
 ---
 
-## Grafana Ingress and ALB
+# 16. Grafana Ingress and ALB
 
-Check ingress:
+## Check ingress
 
 ```bash
 kubectl get ingress -n monitoring
@@ -773,7 +1218,7 @@ HOST: grafana.learnwithmedevops.online
 ADDRESS: k8s-platformtools-xxxx.us-east-1.elb.amazonaws.com
 ```
 
-Describe ingress:
+## Check details
 
 ```bash
 kubectl describe ingress monitoring-grafana -n monitoring
@@ -785,34 +1230,76 @@ Expected event:
 SuccessfullyReconciled
 ```
 
-Expected ALB controller actions:
+## What this means
+
+AWS Load Balancer Controller successfully:
 
 ```text
-created securityGroup
-created targetGroup
-created loadBalancer
-created listener 80
-created listener 443
-created listener rule
-registered targets
-successfully deployed model
+Created ALB
+Created target group
+Created listener on 80
+Created listener on 443
+Attached ACM certificate
+Registered Grafana pod IP as target
+```
+
+## If ADDRESS is empty
+
+Check:
+
+```bash
+kubectl logs -n kube-system deployment/aws-load-balancer-controller --all-containers=true --tail=100
+kubectl describe ingress monitoring-grafana -n monitoring
+```
+
+Common causes:
+
+```text
+AWS Load Balancer Controller not running
+Wrong IAM role
+Wrong IRSA trust policy
+Missing subnet tags
+ACM certificate not issued
+Invalid ingress annotations
 ```
 
 ---
 
-## Route 53 DNS Record
+# 17. Route 53 DNS Record
 
-Create Route 53 record:
+## Created record
 
 ```text
 Record name: grafana
 Record type: A
 Alias: Yes
 Alias target:
-k8s-platformtools-xxxx.us-east-1.elb.amazonaws.com
+k8s-platformtools-9b008a2a90-238508984.us-east-1.elb.amazonaws.com
 ```
 
-Access Grafana:
+## Why Route 53 is needed
+
+Without DNS, you can access only ALB DNS name.
+
+With Route 53:
+
+```text
+grafana.learnwithmedevops.online
+```
+
+points to ALB.
+
+## Access Grafana
+
+```text
+https://grafana.learnwithmedevops.online
+```
+
+---
+
+# 18. Grafana and Prometheus Validation
+
+## Open Grafana
 
 ```text
 https://grafana.learnwithmedevops.online
@@ -822,17 +1309,29 @@ Login:
 
 ```text
 Username: admin
-Password: <GRAFANA_ADMIN_PASSWORD>
+Password: Grafana@12345
 ```
 
----
+## Validate Prometheus datasource
 
-## Prometheus Validation in Grafana
-
-Open:
+In Grafana:
 
 ```text
-Grafana → Explore → Prometheus
+Connections → Data sources → Prometheus → Save & test
+```
+
+Expected:
+
+```text
+Successfully queried the Prometheus API
+```
+
+## Validate using Explore
+
+Go to:
+
+```text
+Grafana → Explore → Prometheus → Code
 ```
 
 Run:
@@ -844,30 +1343,80 @@ kube_node_status_condition{condition="Ready",status="true"}
 Expected:
 
 ```text
-Value = 1
+value = 1
 ```
 
 Meaning:
 
 ```text
-All EKS worker nodes are Ready.
-Prometheus is scraping kube-state-metrics.
+Kubernetes nodes are Ready.
 Grafana can query Prometheus.
+Prometheus is scraping kube-state-metrics.
 ```
 
-Other useful queries:
+---
+
+# 19. Prometheus Metrics Explained
+
+Prometheus metric format:
+
+```text
+metric_name{label1="value1", label2="value2"} value
+```
+
+Example:
+
+```promql
+kube_node_status_condition{condition="Ready",status="true",node="ip-10-0-1-163.ec2.internal"} 1
+```
+
+Meaning:
+
+```text
+Node ip-10-0-1-163 is Ready.
+```
+
+## Important value meaning
+
+```text
+1 = true / healthy / active
+0 = false / unhealthy / inactive
+```
+
+## Useful queries
+
+### Prometheus scrape health
 
 ```promql
 up
 ```
 
+Meaning:
+
+```text
+1 = target is scrapeable
+0 = target is down
+```
+
+### Node Ready status
+
+```promql
+kube_node_status_condition{condition="Ready",status="true"}
+```
+
+### Node CPU usage
+
 ```promql
 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
 ```
 
+### Node memory usage
+
 ```promql
 (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100
 ```
+
+### Pod restarts
 
 ```promql
 increase(kube_pod_container_status_restarts_total[10m])
@@ -875,11 +1424,16 @@ increase(kube_pod_container_status_restarts_total[10m])
 
 ---
 
-## Production Prometheus Alert Rules
+# 20. Production Prometheus Alert Rules
 
-Create `production-alert-rules.yaml`:
+## Why custom rules?
 
-```yaml
+Default kube-prometheus-stack has many built-in alerts, but we created custom simple production rules for learning and validation.
+
+## Create rules
+
+```bash
+cat > production-alert-rules.yaml << 'EOF'
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -926,15 +1480,12 @@ spec:
           annotations:
             summary: "High node memory usage"
             description: "Node {{ $labels.instance }} memory usage is above 85% for 10 minutes."
-```
+EOF
 
-Apply:
-
-```bash
 kubectl apply -f production-alert-rules.yaml
 ```
 
-Verify:
+## Validate
 
 ```bash
 kubectl get prometheusrule -n monitoring | grep production
@@ -948,9 +1499,24 @@ production-alert-rules
 
 ---
 
-## CloudWatch Observability Add-on
+# 21. CloudWatch Observability Add-on
 
-Install add-on:
+## Why CloudWatch if we already have Prometheus?
+
+Prometheus is great for Kubernetes metrics.
+
+CloudWatch is important for AWS-native visibility:
+
+```text
+Container Insights
+CloudWatch Logs
+ALB metrics
+EC2 metrics
+RDS metrics
+AWS service metrics
+```
+
+## Install add-on
 
 ```bash
 aws eks create-addon \
@@ -959,7 +1525,7 @@ aws eks create-addon \
   --addon-name amazon-cloudwatch-observability
 ```
 
-Verify add-on status:
+## Validate add-on
 
 ```bash
 aws eks describe-addon \
@@ -976,7 +1542,7 @@ Expected:
 ACTIVE
 ```
 
-Check pods:
+## Validate pods
 
 ```bash
 kubectl get pods -n amazon-cloudwatch
@@ -985,71 +1551,89 @@ kubectl get pods -n amazon-cloudwatch
 Expected:
 
 ```text
-amazon-cloudwatch-observability-controller-manager Running
-cloudwatch-agent Running on all nodes
-fluent-bit Running on all nodes
+cloudwatch-agent running on 3 nodes
+fluent-bit running on 3 nodes
+controller-manager running
 ```
 
 ---
 
-## CloudWatch IAM Fix
+# 22. Troubleshooting CloudWatch IAM Permissions
 
-Initial issue:
+## Problem
+
+CloudWatch Agent logs showed:
 
 ```text
 AccessDeniedException:
 not authorized to perform logs:PutLogEvents
 ```
 
-Affected role:
+## Meaning
+
+CloudWatch Agent was running, but it did not have IAM permission to push logs/events to CloudWatch Logs.
+
+The denied role:
 
 ```text
-<WORKER_NODE_ROLE_NAME>
+day20-eks-node-20260426093455140300000001
 ```
+
+This was the EKS worker node IAM role.
+
+## Fix
 
 Attach CloudWatch Agent policy:
 
 ```bash
 aws iam attach-role-policy \
-  --role-name <WORKER_NODE_ROLE_NAME> \
+  --role-name day20-eks-node-20260426093455140300000001 \
   --policy-arn arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
 ```
 
-Temporary unblock policy used during troubleshooting:
+Temporary unblock policy:
 
 ```bash
 aws iam attach-role-policy \
-  --role-name <WORKER_NODE_ROLE_NAME> \
+  --role-name day20-eks-node-20260426093455140300000001 \
   --policy-arn arn:aws:iam::aws:policy/CloudWatchAgentAdminPolicy
 ```
 
-> Production recommendation: replace `CloudWatchAgentAdminPolicy` with a least-privilege policy later.
-
-Restart components:
+## Restart pods
 
 ```bash
 kubectl rollout restart daemonset cloudwatch-agent -n amazon-cloudwatch
 kubectl rollout restart daemonset fluent-bit -n amazon-cloudwatch
 ```
 
-Check logs:
+## Validate
 
 ```bash
 kubectl logs -n amazon-cloudwatch ds/cloudwatch-agent --tail=50
-kubectl logs -n amazon-cloudwatch ds/fluent-bit --tail=50
 ```
 
-Expected CloudWatch Agent message:
+Expected:
 
 ```text
 Everything is ready. Begin running and processing data.
 ```
 
+## Troubleshooting lesson
+
+For AWS add-ons, always check:
+
+```text
+1. Pod is running
+2. Pod logs have no AccessDenied
+3. IAM role has required AWS permissions
+4. CloudWatch log groups/metrics are actually created
+```
+
 ---
 
-## CloudWatch Log Group Validation
+# 23. CloudWatch Logs and Metrics Validation
 
-Check log groups:
+## Check log groups
 
 ```bash
 aws logs describe-log-groups \
@@ -1068,7 +1652,7 @@ Expected:
 /aws/containerinsights/day20-eks/performance
 ```
 
-Check application log streams:
+## Check application log streams
 
 ```bash
 aws logs describe-log-streams \
@@ -1081,7 +1665,7 @@ aws logs describe-log-streams \
   --output table
 ```
 
-Check performance log streams:
+## Check performance log streams
 
 ```bash
 aws logs describe-log-streams \
@@ -1097,16 +1681,12 @@ aws logs describe-log-streams \
 Expected node streams:
 
 ```text
-ip-10-0-3-249.ec2.internal
-ip-10-0-2-58.ec2.internal
 ip-10-0-1-163.ec2.internal
+ip-10-0-2-58.ec2.internal
+ip-10-0-3-249.ec2.internal
 ```
 
----
-
-## CloudWatch Metrics Validation
-
-Check Container Insights metrics:
+## Check Container Insights metrics
 
 ```bash
 aws cloudwatch list-metrics \
@@ -1126,59 +1706,67 @@ node_cpu_utilization
 
 ---
 
-## Grafana CloudWatch Datasource
+# 24. Grafana CloudWatch Datasource
 
-In Grafana UI:
+## Why add CloudWatch datasource?
 
-```text
-Grafana → Connections → Data sources → CloudWatch
-```
+Prometheus shows Kubernetes metrics.
 
-Set:
+CloudWatch datasource lets Grafana show AWS metrics/logs:
 
 ```text
-Default Region: us-east-1
-Authentication Provider: AWS SDK Default
+ALB metrics
+EC2 metrics
+CloudWatch Logs
+Container Insights metrics
+RDS metrics
+NAT Gateway metrics
+Billing metrics
 ```
 
-Save and test.
+## First issue
 
-Initial issue:
+Grafana showed:
 
 ```text
 missing default region
 ```
 
-Fix:
+## Fix
+
+In Grafana:
 
 ```text
-Set Default Region = us-east-1
+Connections → Data sources → CloudWatch
+Default Region: us-east-1
+Authentication Provider: AWS SDK Default
+Save & test
 ```
 
-Second issue:
+## Second issue
+
+Grafana showed:
 
 ```text
 AccessDenied:
 cloudwatch:ListMetrics
 ```
 
-Cause:
+## Meaning
 
-```text
-Grafana was using EKS node IAM role.
-```
+Grafana was using the worker node IAM role, which did not have CloudWatch read permissions.
 
 Production fix:
 
 ```text
-Create dedicated Grafana IRSA role for CloudWatch datasource.
+Create separate IAM role for Grafana using IRSA.
 ```
 
 ---
 
-## Grafana CloudWatch IRSA Role
+# 25. Troubleshooting Grafana CloudWatch Datasource
 
-Create trust policy:
+## Create Grafana trust policy
 
 ```bash
 export OIDC_ID=$(aws eks describe-cluster \
@@ -1211,7 +1799,7 @@ cat > grafana-cloudwatch-trust-policy.json << EOF
 EOF
 ```
 
-Create IAM role:
+## Create IAM role
 
 ```bash
 aws iam create-role \
@@ -1219,7 +1807,7 @@ aws iam create-role \
   --assume-role-policy-document file://grafana-cloudwatch-trust-policy.json
 ```
 
-Attach read-only policies:
+## Attach read-only permissions
 
 ```bash
 aws iam attach-role-policy \
@@ -1231,16 +1819,28 @@ aws iam attach-role-policy \
   --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsReadOnlyAccess
 ```
 
-Add annotation under `grafana:` in `kube-prometheus-values.yaml`:
+## Add role annotation in Helm values
+
+Inside `grafana:` block:
+
+```yaml
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::590999018668:role/GrafanaCloudWatchDatasourceRole
+```
+
+Full location:
 
 ```yaml
 grafana:
+  enabled: true
+
   serviceAccount:
     annotations:
-      eks.amazonaws.com/role-arn: arn:aws:iam::<ACCOUNT_ID>:role/GrafanaCloudWatchDatasourceRole
+      eks.amazonaws.com/role-arn: arn:aws:iam::590999018668:role/GrafanaCloudWatchDatasourceRole
 ```
 
-Apply Helm:
+## Apply
 
 ```bash
 helm upgrade monitoring prometheus-community/kube-prometheus-stack \
@@ -1248,14 +1848,14 @@ helm upgrade monitoring prometheus-community/kube-prometheus-stack \
   -f kube-prometheus-values.yaml
 ```
 
-Restart Grafana:
+## Restart Grafana
 
 ```bash
 kubectl rollout restart deployment monitoring-grafana -n monitoring
 kubectl rollout status deployment monitoring-grafana -n monitoring
 ```
 
-Verify annotation:
+## Validate annotation
 
 ```bash
 kubectl get sa monitoring-grafana -n monitoring -o yaml | grep -A5 annotations
@@ -1264,13 +1864,13 @@ kubectl get sa monitoring-grafana -n monitoring -o yaml | grep -A5 annotations
 Expected:
 
 ```text
-eks.amazonaws.com/role-arn: arn:aws:iam::<ACCOUNT_ID>:role/GrafanaCloudWatchDatasourceRole
+eks.amazonaws.com/role-arn: arn:aws:iam::590999018668:role/GrafanaCloudWatchDatasourceRole
 ```
 
-Retest CloudWatch datasource:
+## Retest in Grafana
 
 ```text
-Grafana → CloudWatch datasource → Save & test
+CloudWatch datasource → Save & test
 ```
 
 Expected:
@@ -1282,19 +1882,28 @@ CloudWatch logs API: success
 
 ---
 
-## Alertmanager Slack Integration
+# 26. Alertmanager Slack Integration
 
-Create Slack channel:
+## Why Slack integration?
+
+Monitoring without alerts is incomplete.
+
+Grafana dashboards are useful only when someone is watching. Alerts notify the team when something breaks.
+
+## Create Slack webhook
+
+In Slack:
 
 ```text
-#prod-alerts
+Apps → Incoming Webhooks → Add to Slack
+Choose channel: #prod-alerts
+Copy Webhook URL
 ```
 
-Create Slack incoming webhook for `#prod-alerts`.
+## Create Alertmanager values
 
-Create `alertmanager-slack-values.yaml`:
-
-```yaml
+```bash
+cat > alertmanager-slack-values.yaml << 'EOF'
 alertmanager:
   config:
     global:
@@ -1369,9 +1978,10 @@ alertmanager:
               *Summary:* {{ .Annotations.summary }}
               *Description:* {{ .Annotations.description }}
               {{ end }}
+EOF
 ```
 
-Apply:
+## Apply
 
 ```bash
 helm upgrade monitoring prometheus-community/kube-prometheus-stack \
@@ -1380,14 +1990,14 @@ helm upgrade monitoring prometheus-community/kube-prometheus-stack \
   -f alertmanager-slack-values.yaml
 ```
 
-Restart Alertmanager pods:
+## Restart Alertmanager
 
 ```bash
 kubectl delete pod -n monitoring alertmanager-monitoring-kube-prometheus-alertmanager-0
 kubectl delete pod -n monitoring alertmanager-monitoring-kube-prometheus-alertmanager-1
 ```
 
-Verify:
+## Validate pods
 
 ```bash
 kubectl get pods -n monitoring | grep alertmanager
@@ -1395,11 +2005,12 @@ kubectl get pods -n monitoring | grep alertmanager
 
 ---
 
-## Test Slack Alert
+# 27. Slack Alert Test
 
-Create `test-alert-rule.yaml`:
+## Create test alert
 
-```yaml
+```bash
+cat > test-alert-rule.yaml << 'EOF'
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -1420,15 +2031,12 @@ spec:
           annotations:
             summary: "Test Slack alert from Alertmanager"
             description: "This is a test alert to verify Slack notification routing from Alertmanager."
-```
+EOF
 
-Apply:
-
-```bash
 kubectl apply -f test-alert-rule.yaml
 ```
 
-Verify Prometheus has the alert:
+## Verify Prometheus has the alert
 
 ```bash
 kubectl run prom-check \
@@ -1444,7 +2052,7 @@ Expected:
 TestSlackAlert
 ```
 
-Verify Alertmanager received the alert:
+## Verify Alertmanager received the alert
 
 ```bash
 kubectl run am-check \
@@ -1462,58 +2070,90 @@ TestSlackAlert
 
 ---
 
-## Slack Troubleshooting
+# 28. Troubleshooting Slack Alerts
 
-Issue:
+## Problem
 
-```text
-channel "#prod-alerts": unexpected status code 404: channel_not_found
-```
+Alert existed in Prometheus.
 
-Cause:
+Alert existed in Alertmanager.
 
-```text
-Slack channel #prod-alerts did not exist or webhook was not connected to that channel.
-```
+But Slack did not receive it.
 
-Fix:
+## What this means
 
-```text
-Create/rename Slack channel to #prod-alerts
-Add incoming webhook integration to #prod-alerts
-Restart Alertmanager
-```
+The issue was not Prometheus.
 
-Check logs:
+The issue was not Alertmanager receiving alerts.
+
+The issue was Alertmanager sending to Slack.
+
+## Check Alertmanager logs
 
 ```bash
 kubectl logs -n monitoring alertmanager-monitoring-kube-prometheus-alertmanager-0 \
   -c alertmanager --since=5m | grep -i "slack\|notify\|error\|webhook"
 ```
 
-Expected:
+Error:
 
 ```text
-No channel_not_found error
+channel "#prod-alerts": unexpected status code 404: channel_not_found
 ```
 
-Final result:
+## Meaning
+
+Slack rejected the message because:
 
 ```text
-Slack alert received successfully
+#prod-alerts did not exist
+or webhook was not connected to that channel
+```
+
+## Fix
+
+In Slack:
+
+```text
+Create or rename channel to #prod-alerts
+Add Incoming Webhook integration to #prod-alerts
+```
+
+Then restart Alertmanager:
+
+```bash
+kubectl delete pod -n monitoring alertmanager-monitoring-kube-prometheus-alertmanager-0
+kubectl delete pod -n monitoring alertmanager-monitoring-kube-prometheus-alertmanager-1
+```
+
+## Final result
+
+Slack alert was received successfully.
+
+## Troubleshooting lesson
+
+For alert delivery, follow this order:
+
+```text
+1. Is Prometheus alert firing?
+2. Did Alertmanager receive it?
+3. Is Alertmanager config correct?
+4. Is webhook URL correct?
+5. Is Slack channel correct?
+6. Is outbound network working?
 ```
 
 ---
 
-## Cleanup Test Alert
+# 29. Cleanup Test Alert
 
-After receiving Slack alert:
+After Slack alert was received:
 
 ```bash
 kubectl delete prometheusrule test-slack-alert -n monitoring
 ```
 
-Verify:
+Validate:
 
 ```bash
 kubectl get prometheusrule -n monitoring | grep test
@@ -1527,7 +2167,7 @@ No output
 
 ---
 
-## Final Completed Status
+# 30. Final Status
 
 ```text
 Prometheus:
@@ -1580,9 +2220,11 @@ AWS/EKS Dependencies:
 
 ---
 
-## Pending Application Monitoring
+# 31. Pending After Application Deployment
 
-No application has been deployed yet, so these are pending:
+No application has been deployed yet. So app-specific monitoring is pending.
+
+After application deployment, add:
 
 ```text
 Application ServiceMonitor
@@ -1596,13 +2238,13 @@ Application business metrics
 Application pod-specific dashboards
 ```
 
-After app deployment:
+Application monitoring steps:
 
 ```text
-1. Add actuator dependency in Java app
-2. Expose /actuator/prometheus
+1. Add Spring Boot actuator dependency
+2. Enable /actuator/prometheus
 3. Create ServiceMonitor for app service
-4. Add JVM dashboard
+4. Import JVM dashboard
 5. Add HTTP latency and 5xx alerts
 6. Verify app logs in CloudWatch
 7. Add app dashboards in Grafana
@@ -1610,62 +2252,266 @@ After app deployment:
 
 ---
 
-## Production Hardening Recommendations
+# 32. Production Hardening
 
-Before calling it enterprise-ready:
+Before calling this enterprise-ready:
 
 ```text
 1. Rotate Slack webhook because it was exposed earlier.
 2. Restrict Grafana ALB access using inbound-cidrs or VPN.
-3. Disable/tune EKS-incompatible default alerts:
+3. Disable or tune EKS-incompatible alerts:
    KubeSchedulerDown
    KubeControllerManagerDown
 4. Replace CloudWatchAgentAdminPolicy with least-privilege custom policy.
 5. Store Slack webhook in Kubernetes Secret or External Secrets, not plain values file.
 6. Move all YAML files into Git repo.
-7. Use Argo CD/GitOps to manage monitoring stack.
+7. Manage monitoring stack using Argo CD/GitOps.
 8. Add dashboard backup/export process.
-9. Add retention policies for CloudWatch Logs.
-10. Configure Alertmanager inhibition/silencing rules.
+9. Add CloudWatch Logs retention policies.
+10. Configure Alertmanager inhibition and silencing rules.
 ```
 
 ---
 
-## Final Production Summary
+# 33. How to Think Like a Troubleshooter
+
+You copy-pasted commands during the setup. That is fine for first-time learning.
+
+Now understand the troubleshooting mindset.
+
+## Rule 1: Always identify which layer is failing
+
+Example:
 
 ```text
-This setup completes an EKS cluster-level production monitoring stack.
+Grafana not opening
+```
 
-Prometheus collects Kubernetes and node metrics.
-Grafana provides HTTPS dashboard access through ALB and Route 53.
-CloudWatch collects AWS/EKS logs and Container Insights metrics.
-Alertmanager sends production alerts to Slack.
-All core platform monitoring components are running and validated.
+Possible layers:
+
+```text
+DNS
+ALB
+Ingress
+Service
+Pod
+Application
+Security Group
+Certificate
+```
+
+So check in order:
+
+```bash
+kubectl get ingress -n monitoring
+kubectl describe ingress monitoring-grafana -n monitoring
+kubectl get svc -n monitoring
+kubectl get pods -n monitoring
+kubectl logs -n kube-system deployment/aws-load-balancer-controller
+```
+
+## Rule 2: Read exact error messages
+
+Example error:
+
+```text
+serviceaccount not found
+```
+
+Fix:
+
+```text
+Create ServiceAccount
+```
+
+Example error:
+
+```text
+NoSuchEntity IAM role cannot be found
+```
+
+Fix:
+
+```text
+Create IAM role
+```
+
+Example error:
+
+```text
+AccessDenied logs:PutLogEvents
+```
+
+Fix:
+
+```text
+Attach CloudWatch Logs permission
+```
+
+Example error:
+
+```text
+channel_not_found
+```
+
+Fix:
+
+```text
+Create Slack channel or correct channel name
+```
+
+## Rule 3: Separate symptom and root cause
+
+Symptom:
+
+```text
+Ingress ADDRESS empty
+```
+
+Root cause:
+
+```text
+AWS Load Balancer Controller could not assume IAM role
+```
+
+Symptom:
+
+```text
+CloudWatch pods Running but no logs
+```
+
+Root cause:
+
+```text
+IAM role missing logs:PutLogEvents
+```
+
+Symptom:
+
+```text
+Alertmanager has alert but Slack no message
+```
+
+Root cause:
+
+```text
+Slack channel not found
+```
+
+## Rule 4: Validate after every fix
+
+After fixing ALB Controller:
+
+```bash
+kubectl get deployment -n kube-system aws-load-balancer-controller
+kubectl get ingress -n monitoring
+```
+
+After fixing CloudWatch:
+
+```bash
+aws logs describe-log-groups --log-group-name-prefix /aws/containerinsights/$CLUSTER_NAME
+```
+
+After fixing Slack:
+
+```bash
+kubectl run am-check ...
+```
+
+## Rule 5: Know the flow
+
+### Grafana access flow
+
+```text
+Browser
+  ↓
+Route 53
+  ↓
+ALB
+  ↓
+Ingress
+  ↓
+Kubernetes Service
+  ↓
+Grafana Pod
+```
+
+### Prometheus metric flow
+
+```text
+node-exporter / kube-state-metrics
+  ↓
+Prometheus scrape
+  ↓
+Prometheus storage
+  ↓
+Grafana datasource
+  ↓
+Dashboard / Explore
+```
+
+### Alert flow
+
+```text
+PrometheusRule
+  ↓
+Prometheus evaluates rule
+  ↓
+Alert fires
+  ↓
+Alertmanager receives alert
+  ↓
+Alertmanager route chooses receiver
+  ↓
+Slack webhook sends message
+```
+
+### CloudWatch logs flow
+
+```text
+Container logs
+  ↓
+Fluent Bit
+  ↓
+CloudWatch Agent / CloudWatch output
+  ↓
+CloudWatch Logs
+  ↓
+Grafana CloudWatch datasource
+```
+
+---
+
+# 34. Interview Explanation
+
+You can explain the project like this:
+
+```text
+I implemented a production-style monitoring stack on Amazon EKS using kube-prometheus-stack, Grafana, Alertmanager, AWS CloudWatch Observability add-on, Fluent Bit, AWS Load Balancer Controller, ACM, Route 53, EBS CSI, gp3 volumes, IRSA, and Slack alerting.
+
+Prometheus collects Kubernetes and node-level metrics using kube-state-metrics and node-exporter. Grafana is exposed securely over HTTPS using AWS ALB, ACM certificate, and Route 53. Alertmanager sends critical and warning alerts to Slack. CloudWatch Observability add-on collects Container Insights metrics and container logs using CloudWatch Agent and Fluent Bit.
+
+During the setup, I troubleshot real production issues including AWS Load Balancer Controller failing due to missing ServiceAccount and missing IAM role, IRSA trust policy issues, CloudWatch PutLogEvents AccessDenied error, Grafana CloudWatch datasource ListMetrics AccessDenied error, and Slack channel_not_found alert delivery failure. I validated each layer using kubectl, AWS CLI, Grafana Explore, Prometheus alerts API, Alertmanager API, and CloudWatch log/metric queries.
+```
+
+---
+
+# Final Summary
+
+```text
+This is a real-time production-style EKS cluster monitoring setup.
+
+Cluster/platform monitoring is complete:
+Prometheus
+Grafana
+Alertmanager
+Slack
+CloudWatch Logs
+CloudWatch Metrics
+Container Insights
+ALB HTTPS access
+IRSA-based AWS access
 
 Application-specific monitoring will be added after application deployment.
-```
-
----
-
-## Important Security Notes
-
-Do not commit real secrets to GitHub.
-
-Replace these before committing:
-
-```text
-AWS account IDs
-Certificate ARNs
-Slack webhook URLs
-Grafana admin passwords
-Private domain names if required
-```
-
-Use placeholders or external secret management:
-
-```text
-AWS Secrets Manager
-External Secrets Operator
-Sealed Secrets
-SOPS
 ```
