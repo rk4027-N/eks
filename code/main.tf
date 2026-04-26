@@ -73,7 +73,7 @@ module "eks" {
   # Node groups configuration
   node_groups = {
     general = {
-      instance_types = ["c7i-flex.large"]
+      instance_types = ["m7i-flex.large"]
       desired_size   = 2
       min_size       = 2
       max_size       = 4
@@ -90,7 +90,7 @@ module "eks" {
     }
 
     spot = {
-      instance_types = ["t3.micro", "t3.small"]
+      instance_types = ["m7i-flex.large", "m7i-flex.large"]
       desired_size   = 1
       min_size       = 1
       max_size       = 3
